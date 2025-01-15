@@ -1,0 +1,143 @@
+using System;
+using System.Collections.Generic;
+using System.CommandLine;
+using System.CommandLine.Invocation;
+using System.Linq;
+using System.Net.Http;
+using System.Text.Json;
+using System.Threading.Tasks;
+
+public class Account
+{
+    public string Id { get; set; }
+    public string Name { get; set; }
+    public string Email { get; set; }
+}
+
+public class CreateAccountRequest
+{
+    public string Name { get; set; }
+    public string Email { get; set; }
+}
+
+public class UpdateAccountRequest
+{
+    public string Name { get; set; }
+    public string Email { get; set; }
+}
+
+public class ApiClient
+{
+    private readonly HttpClient _httpClient;
+
+    public ApiClient(HttpClient httpClient)
+    {
+        _httpClient = httpClient;
+    }
+
+    public async Task<object> SendAsync<T>(HttpMethod method, string endpoint, object body = null)
+    {
+        var request = new HttpRequestMessage(method, endpoint);
+
+        if (body != null)
+        {
+            var json = JsonSerializer.Serialize(body);
+            request.Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        }
+
+        var response = await _httpClient.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+
+        var responseBody = await response.Content.ReadAsStringAsync();
+        return JsonSerializer.Deserialize<object>(responseBody);
+    }
+}
+
+class Program
+{
+    static async Task Main(string[] args)
+    {
+        var rootCommand = new RootCommand("My CLI");
+
+// Add options with both long and short names
+var operationOption = new Option<string>(new[] { "--operation", "-o" }, "The operation to perform (get, create, update, delete)")
+{
+    IsRequired = true
+};
+
+var resourceOption = new Option<string>(new[] { "--resource", "-r" }, "The resource to interact with (e.g., accounts)")
+{
+    IsRequired = true
+};
+
+var parametersOption = new Option<string[]>(new[] { "--parameters", "-p" }, "Additional parameters in key=value format");
+
+// Add the options to the root command
+rootCommand.AddOption(operationOption);
+rootCommand.AddOption(resourceOption);
+rootCommand.AddOption(parametersOption);
+
+// Set up the handler
+rootCommand.Handler = CommandHandler.Create<string, string, string[], IHost>(async (operation, resource, parameters, host) =>
+{
+    var apiClient = host.Services.GetRequiredService<ApiClient>();
+    await HandleCommand(apiClient, operation, resource, parameters);
+});
+
+// Run the command
+await rootCommand.InvokeAsync(args);
+
+    }
+
+    private static async Task HandleCommand(ApiClient apiClient, string operation, string resource, string[] parameters)
+    {
+        var endpoint = $"/{resource}";
+        var method = MapOperationToHttpMethod(operation);
+
+        var paramDictionary = parameters
+            .Select(param => param.Split('='))
+            .ToDictionary(parts => parts[0], parts => parts[1]);
+
+        object? body = null;
+
+        if (paramDictionary.TryGetValue("id", out var id))
+        {
+            endpoint += $"/{id}";
+            paramDictionary.Remove("id");
+        }
+
+        body = operation.ToLower() switch
+        {
+            "create" => MapToModel(resource, paramDictionary),
+            "update" => MapToModel(resource, paramDictionary),
+            _ => null
+        };
+
+        var result = await apiClient.SendAsync<object>(method, endpoint, body);
+
+        Console.WriteLine(result != null
+            ? JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true })
+            : "Success");
+    }
+
+    private static object? MapToModel(string resource, Dictionary<string, string> parameters)
+    {
+        var modelType = resource.ToLower() switch
+        {
+            "accounts" => typeof(CreateAccountRequest),
+            _ => throw new ArgumentException($"Unsupported resource: {resource}")
+        };
+
+        var json = JsonSerializer.Serialize(parameters);
+        return JsonSerializer.Deserialize(json, modelType);
+    }
+
+    private static HttpMethod MapOperationToHttpMethod(string operation) => operation.ToLower() switch
+    {
+        "get" => HttpMethod.Get,
+        "create" => HttpMethod.Post,
+        "update" => HttpMethod.Put,
+        "delete" => HttpMethod.Delete,
+        _ => throw new ArgumentException($"Unsupported operation: {operation}")
+    };
+}
